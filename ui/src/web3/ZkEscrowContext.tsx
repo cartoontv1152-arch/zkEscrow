@@ -142,6 +142,8 @@ const ZkEscrowContext = createContext<ContextValue | undefined>(undefined);
 const storageKey = (address: string) => `zkescrow:metadata:${address}`;
 const contractStorageKey = 'zkescrow:preprod:contract';
 const identityStorageKey = 'zkescrow:session:identity';
+const pendingTransactionRetryDelayMs = 12_000;
+const maxPendingTransactionRetries = 20;
 
 const isPrivateMetadata = (value: unknown): value is PrivateMetadata => {
   if (!value || typeof value !== 'object') return false;
@@ -191,6 +193,12 @@ const errorMessage = (error: unknown): string => {
   if (typeof error === 'string') return error;
   return 'The Midnight operation failed. Check your wallet and try again.';
 };
+
+const isPendingTransactionError = (error: unknown): boolean =>
+  errorMessage(error).toLowerCase().includes('transaction is already pending');
+
+const wait = (milliseconds: number): Promise<void> =>
+  new Promise((resolve) => window.setTimeout(resolve, milliseconds));
 
 const encodeWalletPayout = (address: string) => {
   const parsed = MidnightBech32m.parse(address);
@@ -414,13 +422,31 @@ export const ZkEscrowProvider = ({ logger, children }: PropsWithChildren<{ logge
 
       try {
         for (const [index, circuitId] of deferredCircuitIds.entries()) {
-          setBusy(`Installing contract circuit ${index + 1} of ${deferredCircuitIds.length}`);
-          const state = await providers.publicDataProvider.queryContractState(address);
-          if (!state) throw new Error('The new registry is not visible in the Preprod indexer yet. Retry in a moment.');
-          if (state.operation(circuitId)) continue;
           const verifierKey = await providers.zkConfigProvider.getVerifierKey(circuitId);
-          const finalized = await submitInsertVerifierKeyTx(providers, browserContract, address, circuitId, verifierKey);
-          setLastTransaction({ label: `Installed ${circuitId}`, txId: String(finalized.txId), blockHeight: finalized.blockHeight });
+          let pendingRetries = 0;
+
+          while (true) {
+            setBusy(`Installing contract circuit ${index + 1} of ${deferredCircuitIds.length}`);
+            const state = await providers.publicDataProvider.queryContractState(address);
+            if (!state) throw new Error('The new registry is not visible in the Preprod indexer yet. Retry in a moment.');
+            if (state.operation(circuitId)) break;
+
+            try {
+              const finalized = await submitInsertVerifierKeyTx(providers, browserContract, address, circuitId, verifierKey);
+              setLastTransaction({ label: `Installed ${circuitId}`, txId: String(finalized.txId), blockHeight: finalized.blockHeight });
+              break;
+            } catch (cause) {
+              if (!isPendingTransactionError(cause) || pendingRetries >= maxPendingTransactionRetries) throw cause;
+              pendingRetries += 1;
+              setBusy(`Waiting for wallet confirmation before circuit ${index + 1} of ${deferredCircuitIds.length}`);
+              await wait(pendingTransactionRetryDelayMs);
+            }
+          }
+
+          if (index < deferredCircuitIds.length - 1) {
+            setBusy(`Syncing wallet after circuit ${index + 1} of ${deferredCircuitIds.length}`);
+            await wait(pendingTransactionRetryDelayMs);
+          }
         }
       } catch (cause) {
         const message = cause instanceof Error ? cause.message : String(cause);
