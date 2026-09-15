@@ -1,0 +1,631 @@
+pragma language_version >= 0.22 && <= 0.23;
+
+import CompactStandardLibrary;
+
+export enum DealStatus {
+    DRAFT,
+    ACCEPTED,
+    FUNDED,
+    IN_PROGRESS,
+    DISPUTED,
+    COMPLETED,
+    CANCELLED,
+    REFUNDED,
+    SETTLED
+}
+
+export enum MilestoneStatus {
+    PENDING,
+    SUBMITTED,
+    PAID,
+    REFUNDED
+}
+
+export new type UserSecretKey = Bytes<32>;
+export new type UserPublicKey = Bytes<32>;
+
+export struct Deal {
+    buyerKey: UserPublicKey;
+    sellerKey: UserPublicKey;
+    arbitratorKey: UserPublicKey;
+    sellerInviteCommitment: Bytes<32>;
+    arbitratorInviteCommitment: Bytes<32>;
+    buyerPayout: UserAddress;
+    sellerPayout: UserAddress;
+    amount: Uint<64>;
+    plannedAmount: Uint<64>;
+    fundedAmount: Uint<64>;
+    releasedAmount: Uint<64>;
+    refundedAmount: Uint<64>;
+    milestoneCount: Uint<16>;
+    paidMilestoneCount: Uint<16>;
+    settledMilestoneCount: Uint<16>;
+    deadline: Uint<64>;
+    metadataCommitment: Bytes<32>;
+    status: DealStatus;
+    refundRequested: Boolean;
+}
+
+export struct Milestone {
+    amount: Uint<64>;
+    deliveryDeadline: Uint<64>;
+    reviewDeadline: Uint<64>;
+    labelCommitment: Bytes<32>;
+    deliveryCommitment: Bytes<32>;
+    status: MilestoneStatus;
+}
+
+export struct Dispute {
+    buyerEvidence: Bytes<32>;
+    sellerEvidence: Bytes<32>;
+    resolved: Boolean;
+    sellerAward: Uint<64>;
+    buyerAward: Uint<64>;
+}
+
+export ledger dealCount: Counter;
+export ledger completedDealCount: Counter;
+export ledger deals: Map<Uint<64>, Deal>;
+export ledger milestones: Map<Uint<64>, Map<Uint<16>, Milestone>>;
+export ledger disputes: Map<Uint<64>, Dispute>;
+export ledger completedBySeller: Map<UserPublicKey, Uint<64>>;
+
+witness getUserSecret(): UserSecretKey;
+
+constructor() {}
+
+export pure circuit deriveUserPublicKey(secret: UserSecretKey): UserPublicKey {
+    return persistentHash<[Bytes<20>, UserSecretKey]>([
+        "zkescrow:user:key:v1",
+        secret
+    ]) as UserPublicKey;
+}
+
+export pure circuit inviteCommitment(secret: Bytes<32>): Bytes<32> {
+    return persistentHash<[Bytes<22>, Bytes<32>]>([
+        "zkescrow:invite:key:v1",
+        secret
+    ]);
+}
+
+circuit currentUserKey(): UserPublicKey {
+    return deriveUserPublicKey(getUserSecret());
+}
+
+circuit requireDeal(dealId: Uint<64>): Deal {
+    assert(deals.member(dealId), "Escrow does not exist");
+    return deals.lookup(dealId);
+}
+
+circuit requireBuyer(deal: Deal): [] {
+    assert(deal.buyerKey == currentUserKey(), "Only the buyer can perform this action");
+}
+
+circuit requireSeller(deal: Deal): [] {
+    assert(deal.sellerKey == currentUserKey(), "Only the seller can perform this action");
+}
+
+circuit requireArbitrator(deal: Deal): [] {
+    assert(deal.arbitratorKey == currentUserKey(), "Only the arbitrator can perform this action");
+}
+
+circuit updatedDeal(
+    deal: Deal,
+    sellerKey: UserPublicKey,
+    arbitratorKey: UserPublicKey,
+    sellerPayout: UserAddress,
+    plannedAmount: Uint<64>,
+    fundedAmount: Uint<64>,
+    releasedAmount: Uint<64>,
+    refundedAmount: Uint<64>,
+    milestoneCount: Uint<16>,
+    paidMilestoneCount: Uint<16>,
+    settledMilestoneCount: Uint<16>,
+    status: DealStatus,
+    refundRequested: Boolean
+): Deal {
+    return Deal {
+        buyerKey: deal.buyerKey,
+        sellerKey: sellerKey,
+        arbitratorKey: arbitratorKey,
+        sellerInviteCommitment: deal.sellerInviteCommitment,
+        arbitratorInviteCommitment: deal.arbitratorInviteCommitment,
+        buyerPayout: deal.buyerPayout,
+        sellerPayout: sellerPayout,
+        amount: deal.amount,
+        plannedAmount: plannedAmount,
+        fundedAmount: fundedAmount,
+        releasedAmount: releasedAmount,
+        refundedAmount: refundedAmount,
+        milestoneCount: milestoneCount,
+        paidMilestoneCount: paidMilestoneCount,
+        settledMilestoneCount: settledMilestoneCount,
+        deadline: deal.deadline,
+        metadataCommitment: deal.metadataCommitment,
+        status: status,
+        refundRequested: refundRequested
+    };
+}
+
+export circuit createDeal(
+    amount: Uint<64>,
+    deadline: Uint<64>,
+    metadataCommitment: Bytes<32>,
+    sellerInviteSecret: Bytes<32>,
+    arbitratorInviteSecret: Bytes<32>,
+    buyerPayout: UserAddress
+): Uint<64> {
+    assert(amount > 0, "Escrow amount must be greater than zero");
+    const publicDeadline = disclose(deadline);
+    assert(blockTimeLt(publicDeadline), "Deadline must be in the future");
+
+    dealCount.increment(1);
+    const id = dealCount as Uint<64>;
+    const deal = Deal {
+        buyerKey: disclose(currentUserKey()),
+        sellerKey: default<UserPublicKey>,
+        arbitratorKey: default<UserPublicKey>,
+        sellerInviteCommitment: disclose(inviteCommitment(sellerInviteSecret)),
+        arbitratorInviteCommitment: disclose(inviteCommitment(arbitratorInviteSecret)),
+        buyerPayout: disclose(buyerPayout),
+        sellerPayout: default<UserAddress>,
+        amount: disclose(amount),
+        plannedAmount: 0,
+        fundedAmount: 0,
+        releasedAmount: 0,
+        refundedAmount: 0,
+        milestoneCount: 0,
+        paidMilestoneCount: 0,
+        settledMilestoneCount: 0,
+        deadline: publicDeadline,
+        metadataCommitment: disclose(metadataCommitment),
+        status: DealStatus.DRAFT,
+        refundRequested: false
+    };
+    deals.insert(id, deal);
+    milestones.insert(id, default<Map<Uint<16>, Milestone>>);
+    return disclose(id);
+}
+
+export circuit addMilestone(
+    dealId: Uint<64>,
+    amount: Uint<64>,
+    deliveryDeadline: Uint<64>,
+    reviewDeadline: Uint<64>,
+    labelCommitment: Bytes<32>
+): Uint<16> {
+    const id = disclose(dealId);
+    const deal = requireDeal(id);
+    requireBuyer(deal);
+    assert(deal.status == DealStatus.DRAFT, "Milestones are locked after acceptance");
+    assert(amount > 0, "Milestone amount must be greater than zero");
+    assert(blockTimeLt(disclose(deliveryDeadline)), "Delivery deadline must be in the future");
+    assert(deliveryDeadline < reviewDeadline, "Review deadline must follow delivery deadline");
+    assert(reviewDeadline <= deal.deadline, "Milestone review deadline exceeds deal deadline");
+    assert(deal.milestoneCount < 12, "A deal supports at most 12 milestones");
+    assert(disclose(amount) <= deal.amount - deal.plannedAmount, "Milestone total exceeds escrow amount");
+
+    const milestoneId = (deal.milestoneCount + 1) as Uint<16>;
+    const milestone = Milestone {
+        amount: disclose(amount),
+        deliveryDeadline: disclose(deliveryDeadline),
+        reviewDeadline: disclose(reviewDeadline),
+        labelCommitment: disclose(labelCommitment),
+        deliveryCommitment: default<Bytes<32>>,
+        status: MilestoneStatus.PENDING
+    };
+    milestones.lookup(id).insert(milestoneId, milestone);
+    deals.insert(id, updatedDeal(
+        deal,
+        deal.sellerKey,
+        deal.arbitratorKey,
+        deal.sellerPayout,
+        (deal.plannedAmount + disclose(amount)) as Uint<64>,
+        deal.fundedAmount,
+        deal.releasedAmount,
+        deal.refundedAmount,
+        milestoneId,
+        deal.paidMilestoneCount,
+        deal.settledMilestoneCount,
+        deal.status,
+        deal.refundRequested
+    ));
+    return disclose(milestoneId);
+}
+
+export circuit acceptDeal(dealId: Uint<64>, inviteSecret: Bytes<32>, payout: UserAddress): [] {
+    const id = disclose(dealId);
+    const deal = requireDeal(id);
+    assert(deal.status == DealStatus.DRAFT, "Escrow is not awaiting seller acceptance");
+    assert(blockTimeLt(deal.deadline), "Escrow deadline has passed");
+    assert(deal.milestoneCount > 0, "Escrow needs at least one milestone");
+    assert(deal.plannedAmount == deal.amount, "Milestones must equal the escrow amount");
+    assert(inviteCommitment(inviteSecret) == deal.sellerInviteCommitment, "Invalid seller invitation");
+    assert(currentUserKey() != deal.buyerKey, "The buyer cannot accept as seller");
+    assert(currentUserKey() != deal.arbitratorKey, "The arbitrator cannot accept as seller");
+
+    deals.insert(id, updatedDeal(
+        deal,
+        disclose(currentUserKey()),
+        deal.arbitratorKey,
+        disclose(payout),
+        deal.plannedAmount,
+        deal.fundedAmount,
+        deal.releasedAmount,
+        deal.refundedAmount,
+        deal.milestoneCount,
+        deal.paidMilestoneCount,
+        deal.settledMilestoneCount,
+        DealStatus.ACCEPTED,
+        false
+    ));
+}
+
+export circuit claimArbitrator(dealId: Uint<64>, inviteSecret: Bytes<32>): [] {
+    const id = disclose(dealId);
+    const deal = requireDeal(id);
+    assert(deal.status != DealStatus.COMPLETED && deal.status != DealStatus.CANCELLED && deal.status != DealStatus.REFUNDED && deal.status != DealStatus.SETTLED,
+           "Escrow is already closed");
+    assert(inviteCommitment(inviteSecret) == deal.arbitratorInviteCommitment, "Invalid arbitrator invitation");
+    assert(deal.arbitratorKey == default<UserPublicKey>, "Arbitrator already claimed");
+    assert(currentUserKey() != deal.buyerKey && currentUserKey() != deal.sellerKey, "A deal participant cannot be the arbitrator");
+
+    deals.insert(id, updatedDeal(
+        deal,
+        deal.sellerKey,
+        disclose(currentUserKey()),
+        deal.sellerPayout,
+        deal.plannedAmount,
+        deal.fundedAmount,
+        deal.releasedAmount,
+        deal.refundedAmount,
+        deal.milestoneCount,
+        deal.paidMilestoneCount,
+        deal.settledMilestoneCount,
+        deal.status,
+        deal.refundRequested
+    ));
+}
+
+export circuit fundDeal(dealId: Uint<64>, amount: Uint<64>): [] {
+    const id = disclose(dealId);
+    const deal = requireDeal(id);
+    requireBuyer(deal);
+    assert(deal.status == DealStatus.ACCEPTED, "Seller must accept before funding");
+    assert(blockTimeLt(deal.deadline), "Escrow deadline has passed");
+    assert(amount == deal.amount, "Funding must match the escrow amount");
+
+    receiveUnshielded(default<Bytes<32>>, disclose(amount) as Uint<128>);
+    deals.insert(id, updatedDeal(
+        deal,
+        deal.sellerKey,
+        deal.arbitratorKey,
+        deal.sellerPayout,
+        deal.plannedAmount,
+        disclose(amount),
+        deal.releasedAmount,
+        deal.refundedAmount,
+        deal.milestoneCount,
+        deal.paidMilestoneCount,
+        deal.settledMilestoneCount,
+        DealStatus.FUNDED,
+        false
+    ));
+}
+
+export circuit submitMilestone(dealId: Uint<64>, milestoneId: Uint<16>, deliveryCommitment: Bytes<32>): [] {
+    const id = disclose(dealId);
+    const mid = disclose(milestoneId);
+    const deal = requireDeal(id);
+    requireSeller(deal);
+    assert(deal.status == DealStatus.FUNDED || deal.status == DealStatus.IN_PROGRESS, "Escrow is not active");
+    assert(milestones.lookup(id).member(mid), "Milestone does not exist");
+    const milestone = milestones.lookup(id).lookup(mid);
+    assert(milestone.status == MilestoneStatus.PENDING, "Milestone was already submitted");
+    assert(blockTimeLte(milestone.deliveryDeadline), "Delivery deadline has passed");
+
+    milestones.lookup(id).insert(mid, Milestone {
+        amount: milestone.amount,
+        deliveryDeadline: milestone.deliveryDeadline,
+        reviewDeadline: milestone.reviewDeadline,
+        labelCommitment: milestone.labelCommitment,
+        deliveryCommitment: disclose(deliveryCommitment),
+        status: MilestoneStatus.SUBMITTED
+    });
+    deals.insert(id, updatedDeal(
+        deal,
+        deal.sellerKey,
+        deal.arbitratorKey,
+        deal.sellerPayout,
+        deal.plannedAmount,
+        deal.fundedAmount,
+        deal.releasedAmount,
+        deal.refundedAmount,
+        deal.milestoneCount,
+        deal.paidMilestoneCount,
+        deal.settledMilestoneCount,
+        DealStatus.IN_PROGRESS,
+        false
+    ));
+}
+
+circuit payMilestone(dealId: Uint<64>, milestoneId: Uint<16>, deal: Deal, milestone: Milestone): [] {
+    sendUnshielded(
+        default<Bytes<32>>,
+        milestone.amount as Uint<128>,
+        right<ContractAddress, UserAddress>(deal.sellerPayout)
+    );
+
+    milestones.lookup(dealId).insert(milestoneId, Milestone {
+        amount: milestone.amount,
+        deliveryDeadline: milestone.deliveryDeadline,
+        reviewDeadline: milestone.reviewDeadline,
+        labelCommitment: milestone.labelCommitment,
+        deliveryCommitment: milestone.deliveryCommitment,
+        status: MilestoneStatus.PAID
+    });
+
+    const nextPaidCount = (deal.paidMilestoneCount + 1) as Uint<16>;
+    const nextSettledCount = (deal.settledMilestoneCount + 1) as Uint<16>;
+    const allSettled = nextSettledCount == deal.milestoneCount;
+    const fullyCompleted = nextPaidCount == deal.milestoneCount;
+    if (fullyCompleted) {
+        completedDealCount.increment(1);
+        if (completedBySeller.member(deal.sellerKey)) {
+            assert(completedBySeller.lookup(deal.sellerKey) < 18446744073709551615, "Seller reputation counter overflow");
+            completedBySeller.insert(deal.sellerKey, (completedBySeller.lookup(deal.sellerKey) + 1) as Uint<64>);
+        } else {
+            completedBySeller.insert(deal.sellerKey, 1);
+        }
+    }
+
+    deals.insert(dealId, updatedDeal(
+        deal,
+        deal.sellerKey,
+        deal.arbitratorKey,
+        deal.sellerPayout,
+        deal.plannedAmount,
+        deal.fundedAmount,
+        (deal.releasedAmount + milestone.amount) as Uint<64>,
+        deal.refundedAmount,
+        deal.milestoneCount,
+        nextPaidCount,
+        nextSettledCount,
+        allSettled ? (fullyCompleted ? DealStatus.COMPLETED : DealStatus.SETTLED) : DealStatus.IN_PROGRESS,
+        false
+    ));
+}
+
+export circuit approveMilestone(dealId: Uint<64>, milestoneId: Uint<16>): [] {
+    const id = disclose(dealId);
+    const mid = disclose(milestoneId);
+    const deal = requireDeal(id);
+    requireBuyer(deal);
+    assert(deal.status == DealStatus.IN_PROGRESS, "Escrow is not awaiting approval");
+    assert(milestones.lookup(id).member(mid), "Milestone does not exist");
+    const milestone = milestones.lookup(id).lookup(mid);
+    assert(milestone.status == MilestoneStatus.SUBMITTED, "Milestone is not awaiting approval");
+    payMilestone(id, mid, deal, milestone);
+}
+
+export circuit autoReleaseMilestone(dealId: Uint<64>, milestoneId: Uint<16>): [] {
+    const id = disclose(dealId);
+    const mid = disclose(milestoneId);
+    const deal = requireDeal(id);
+    requireSeller(deal);
+    assert(deal.status == DealStatus.IN_PROGRESS, "Escrow is not awaiting approval");
+    assert(milestones.lookup(id).member(mid), "Milestone does not exist");
+    const milestone = milestones.lookup(id).lookup(mid);
+    assert(milestone.status == MilestoneStatus.SUBMITTED, "Milestone is not awaiting approval");
+    assert(blockTimeGte(milestone.reviewDeadline), "Review window is still open");
+    payMilestone(id, mid, deal, milestone);
+}
+
+export circuit requestRefund(dealId: Uint<64>): [] {
+    const id = disclose(dealId);
+    const deal = requireDeal(id);
+    requireBuyer(deal);
+    assert(deal.status == DealStatus.FUNDED || deal.status == DealStatus.IN_PROGRESS, "Escrow cannot be refunded now");
+    deals.insert(id, updatedDeal(
+        deal,
+        deal.sellerKey,
+        deal.arbitratorKey,
+        deal.sellerPayout,
+        deal.plannedAmount,
+        deal.fundedAmount,
+        deal.releasedAmount,
+        deal.refundedAmount,
+        deal.milestoneCount,
+        deal.paidMilestoneCount,
+        deal.settledMilestoneCount,
+        deal.status,
+        true
+    ));
+}
+
+export circuit approveRefund(dealId: Uint<64>): [] {
+    const id = disclose(dealId);
+    const deal = requireDeal(id);
+    requireSeller(deal);
+    assert(deal.refundRequested, "Buyer has not requested a refund");
+    const remaining = deal.fundedAmount - deal.releasedAmount - deal.refundedAmount;
+    sendUnshielded(default<Bytes<32>>, remaining as Uint<128>, right<ContractAddress, UserAddress>(deal.buyerPayout));
+    deals.insert(id, updatedDeal(
+        deal,
+        deal.sellerKey,
+        deal.arbitratorKey,
+        deal.sellerPayout,
+        deal.plannedAmount,
+        deal.fundedAmount,
+        deal.releasedAmount,
+        (deal.refundedAmount + remaining) as Uint<64>,
+        deal.milestoneCount,
+        deal.paidMilestoneCount,
+        deal.settledMilestoneCount,
+        DealStatus.REFUNDED,
+        false
+    ));
+}
+
+export circuit claimLateRefund(dealId: Uint<64>, milestoneId: Uint<16>): [] {
+    const id = disclose(dealId);
+    const mid = disclose(milestoneId);
+    const deal = requireDeal(id);
+    requireBuyer(deal);
+    assert(deal.status == DealStatus.FUNDED || deal.status == DealStatus.IN_PROGRESS, "Escrow cannot be refunded now");
+    assert(milestones.lookup(id).member(mid), "Milestone does not exist");
+    const milestone = milestones.lookup(id).lookup(mid);
+    assert(milestone.status == MilestoneStatus.PENDING, "Seller already submitted this milestone");
+    assert(blockTimeGt(milestone.deliveryDeadline), "Delivery deadline has not passed");
+    sendUnshielded(default<Bytes<32>>, milestone.amount as Uint<128>, right<ContractAddress, UserAddress>(deal.buyerPayout));
+    milestones.lookup(id).insert(mid, Milestone {
+        amount: milestone.amount,
+        deliveryDeadline: milestone.deliveryDeadline,
+        reviewDeadline: milestone.reviewDeadline,
+        labelCommitment: milestone.labelCommitment,
+        deliveryCommitment: milestone.deliveryCommitment,
+        status: MilestoneStatus.REFUNDED
+    });
+    const nextRefunded = (deal.refundedAmount + milestone.amount) as Uint<64>;
+    const nextSettled = (deal.settledMilestoneCount + 1) as Uint<16>;
+    const allSettled = nextSettled == deal.milestoneCount;
+    const fullyRefunded = nextRefunded == deal.fundedAmount;
+    deals.insert(id, updatedDeal(
+        deal,
+        deal.sellerKey,
+        deal.arbitratorKey,
+        deal.sellerPayout,
+        deal.plannedAmount,
+        deal.fundedAmount,
+        deal.releasedAmount,
+        nextRefunded,
+        deal.milestoneCount,
+        deal.paidMilestoneCount,
+        nextSettled,
+        allSettled ? (fullyRefunded ? DealStatus.REFUNDED : DealStatus.SETTLED) : DealStatus.IN_PROGRESS,
+        false
+    ));
+}
+
+export circuit cancelUnfunded(dealId: Uint<64>): [] {
+    const id = disclose(dealId);
+    const deal = requireDeal(id);
+    requireBuyer(deal);
+    assert(deal.status == DealStatus.DRAFT || deal.status == DealStatus.ACCEPTED, "Funded escrow cannot be cancelled directly");
+    deals.insert(id, updatedDeal(
+        deal,
+        deal.sellerKey,
+        deal.arbitratorKey,
+        deal.sellerPayout,
+        deal.plannedAmount,
+        deal.fundedAmount,
+        deal.releasedAmount,
+        deal.refundedAmount,
+        deal.milestoneCount,
+        deal.paidMilestoneCount,
+        deal.settledMilestoneCount,
+        DealStatus.CANCELLED,
+        false
+    ));
+}
+
+export circuit openDispute(dealId: Uint<64>, evidenceCommitment: Bytes<32>): [] {
+    const id = disclose(dealId);
+    const deal = requireDeal(id);
+    const user = disclose(currentUserKey());
+    assert(user == deal.buyerKey || user == deal.sellerKey, "Only a deal participant can open a dispute");
+    assert(deal.status == DealStatus.FUNDED || deal.status == DealStatus.IN_PROGRESS, "Escrow cannot be disputed now");
+    assert(deal.arbitratorKey != default<UserPublicKey>, "An arbitrator must claim the invitation before a dispute can open");
+
+    const evidence = disclose(evidenceCommitment);
+    disputes.insert(id, Dispute {
+        buyerEvidence: user == deal.buyerKey ? evidence : default<Bytes<32>>,
+        sellerEvidence: user == deal.sellerKey ? evidence : default<Bytes<32>>,
+        resolved: false,
+        sellerAward: 0,
+        buyerAward: 0
+    });
+    deals.insert(id, updatedDeal(
+        deal,
+        deal.sellerKey,
+        deal.arbitratorKey,
+        deal.sellerPayout,
+        deal.plannedAmount,
+        deal.fundedAmount,
+        deal.releasedAmount,
+        deal.refundedAmount,
+        deal.milestoneCount,
+        deal.paidMilestoneCount,
+        deal.settledMilestoneCount,
+        DealStatus.DISPUTED,
+        false
+    ));
+}
+
+export circuit submitDisputeEvidence(dealId: Uint<64>, evidenceCommitment: Bytes<32>): [] {
+    const id = disclose(dealId);
+    const deal = requireDeal(id);
+    const user = disclose(currentUserKey());
+    assert(deal.status == DealStatus.DISPUTED, "Escrow is not disputed");
+    assert(user == deal.buyerKey || user == deal.sellerKey, "Only a deal participant can submit evidence");
+    const dispute = disputes.lookup(id);
+    const evidence = disclose(evidenceCommitment);
+    disputes.insert(id, Dispute {
+        buyerEvidence: user == deal.buyerKey ? evidence : dispute.buyerEvidence,
+        sellerEvidence: user == deal.sellerKey ? evidence : dispute.sellerEvidence,
+        resolved: false,
+        sellerAward: 0,
+        buyerAward: 0
+    });
+}
+
+export circuit resolveDispute(dealId: Uint<64>, sellerAward: Uint<64>, buyerAward: Uint<64>): [] {
+    const id = disclose(dealId);
+    const deal = requireDeal(id);
+    requireArbitrator(deal);
+    assert(deal.status == DealStatus.DISPUTED, "Escrow is not disputed");
+    const remaining = deal.fundedAmount - deal.releasedAmount - deal.refundedAmount;
+    const publicSellerAward = disclose(sellerAward);
+    const publicBuyerAward = disclose(buyerAward);
+    assert(publicSellerAward <= remaining && publicBuyerAward <= remaining, "Award exceeds the remaining escrow balance");
+    assert(publicSellerAward == remaining - publicBuyerAward, "Awards must equal the remaining escrow balance");
+
+    if (publicSellerAward > 0) {
+        sendUnshielded(default<Bytes<32>>, publicSellerAward as Uint<128>, right<ContractAddress, UserAddress>(deal.sellerPayout));
+    }
+    if (publicBuyerAward > 0) {
+        sendUnshielded(default<Bytes<32>>, publicBuyerAward as Uint<128>, right<ContractAddress, UserAddress>(deal.buyerPayout));
+    }
+
+    const dispute = disputes.lookup(id);
+    disputes.insert(id, Dispute {
+        buyerEvidence: dispute.buyerEvidence,
+        sellerEvidence: dispute.sellerEvidence,
+        resolved: true,
+        sellerAward: publicSellerAward,
+        buyerAward: publicBuyerAward
+    });
+    deals.insert(id, updatedDeal(
+        deal,
+        deal.sellerKey,
+        deal.arbitratorKey,
+        deal.sellerPayout,
+        deal.plannedAmount,
+        deal.fundedAmount,
+        (deal.releasedAmount + publicSellerAward) as Uint<64>,
+        (deal.refundedAmount + publicBuyerAward) as Uint<64>,
+        deal.milestoneCount,
+        deal.paidMilestoneCount,
+        deal.settledMilestoneCount,
+        DealStatus.SETTLED,
+        false
+    ));
+}
+
+export circuit proveCompletedAtLeast(minimum: Uint<64>): Boolean {
+    assert(minimum > 0, "Minimum reputation must be greater than zero");
+    const sellerKey = currentUserKey();
+    assert(completedBySeller.member(disclose(sellerKey)), "No completed escrow history");
+    assert(completedBySeller.lookup(disclose(sellerKey)) >= disclose(minimum), "Reputation threshold is not met");
+    return true;
+}

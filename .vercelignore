@@ -1,0 +1,9 @@
+node_modules/
+ui/dist/
+contract/dist/
+api/dist/
+ui/public/keys/
+ui/public/zkir/
+.vite/
+coverage/
+.reference-*/

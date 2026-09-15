@@ -1,0 +1,31 @@
+{
+  "name": "@zkescrow/ui",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --mode preprod",
+    "build": "node ../scripts/copy-zk-artifacts.mjs && tsc -p tsconfig.json && vite build --mode preprod",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "preview": "vite preview --host 127.0.0.1"
+  },
+  "dependencies": {
+    "@midnight-ntwrk/wallet-sdk-address-format": "3.1.2",
+    "@fontsource-variable/manrope": "^5.2.8",
+    "@fontsource/ibm-plex-mono": "^5.2.8",
+    "@phosphor-icons/react": "^2.1.10",
+    "@zkescrow/api": "1.0.0",
+    "@zkescrow/contract": "1.0.0",
+    "motion": "^12.23.24",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.2",
+    "@types/react-dom": "^19.2.2",
+    "@vitejs/plugin-react": "5.1.2",
+    "vite": "6.4.3",
+    "vite-plugin-wasm": "3.6.0"
+  }
+}

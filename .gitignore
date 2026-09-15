@@ -1,0 +1,14 @@
+node_modules/
+**/dist/
+ui/public/keys/
+ui/public/zkir/
+.env
+.env.*
+!.env.example
+coverage/
+*.log
+.reference-*/
+.vscode/
+.DS_Store
+
+.vercel
