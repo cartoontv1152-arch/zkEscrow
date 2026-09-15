@@ -40,7 +40,7 @@ export class ZkEscrowBootstrapContract extends Contract<ZkEscrowPrivateState, Wi
     const allProvableCircuits = this.provableCircuits;
     this.provableCircuits = Object.fromEntries(
       bootstrapCircuitIds.map((circuitId) => [circuitId, allProvableCircuits[circuitId]]),
-    ) as ZkContract['provableCircuits'];
+    ) as unknown as ZkContract['provableCircuits'];
   }
 
   override initialState(...args: Parameters<ZkContract['initialState']>): ReturnType<ZkContract['initialState']> {
