@@ -20,7 +20,9 @@ import { CompiledContract } from '@midnight-ntwrk/midnight-js-protocol/compact-j
 import {
   encodeUserAddress,
   fromHex,
+  sampleSigningKey,
   type ContractAddress,
+  type SigningKey,
 } from '@midnight-ntwrk/midnight-js-protocol/compact-runtime';
 import {
   Binding,
@@ -142,8 +144,11 @@ const ZkEscrowContext = createContext<ContextValue | undefined>(undefined);
 const storageKey = (address: string) => `zkescrow:metadata:${address}`;
 const contractStorageKey = 'zkescrow:preprod:contract';
 const identityStorageKey = 'zkescrow:session:identity';
+const pendingContractStorageKey = 'zkescrow:session:pending-contract';
+const pendingSigningKeyStorageKey = 'zkescrow:session:pending-signing-key';
 const pendingTransactionRetryDelayMs = 12_000;
-const maxPendingTransactionRetries = 20;
+const bannedTransactionRetryDelayMs = 60_000;
+const maxTransactionRetries = 30;
 
 const isPrivateMetadata = (value: unknown): value is PrivateMetadata => {
   if (!value || typeof value !== 'object') return false;
@@ -194,8 +199,12 @@ const errorMessage = (error: unknown): string => {
   return 'The Midnight operation failed. Check your wallet and try again.';
 };
 
-const isPendingTransactionError = (error: unknown): boolean =>
-  errorMessage(error).toLowerCase().includes('transaction is already pending');
+const transactionRetryDelay = (error: unknown): number | null => {
+  const message = errorMessage(error).toLowerCase();
+  if (message.includes('transaction is already pending')) return pendingTransactionRetryDelayMs;
+  if (message.includes('transaction is temporarily banned')) return bannedTransactionRetryDelayMs;
+  return null;
+};
 
 const wait = (milliseconds: number): Promise<void> =>
   new Promise((resolve) => window.setTimeout(resolve, milliseconds));
@@ -410,20 +419,34 @@ export const ZkEscrowProvider = ({ logger, children }: PropsWithChildren<{ logge
       let address = pendingDeploymentRef.current;
 
       if (!address) {
+        const storedAddress = sessionStorage.getItem(pendingContractStorageKey);
+        const storedSigningKey = sessionStorage.getItem(pendingSigningKeyStorageKey);
+        if (/^[0-9a-f]{64}$/i.test(storedAddress ?? '') && /^[0-9a-f]{64}$/i.test(storedSigningKey ?? '')) {
+          address = storedAddress as ContractAddress;
+          pendingDeploymentRef.current = address;
+          await privateStateProvider.setSigningKey(address, storedSigningKey as SigningKey);
+        }
+      }
+
+      if (!address) {
+        const signingKey = sampleSigningKey();
         const deployed = await deployContract(providers, {
           compiledContract: bootstrapContract,
           privateStateId: PRIVATE_STATE_ID,
           initialPrivateState: { userSecret: identity },
+          signingKey,
         });
         address = deployed.deployTxData.public.contractAddress;
         pendingDeploymentRef.current = address;
+        sessionStorage.setItem(pendingContractStorageKey, address);
+        sessionStorage.setItem(pendingSigningKeyStorageKey, signingKey);
         setLastTransaction({ label: 'Core contract deployment', txId: String(deployed.deployTxData.public.txId), blockHeight: deployed.deployTxData.public.blockHeight });
       }
 
       try {
         for (const [index, circuitId] of deferredCircuitIds.entries()) {
           const verifierKey = await providers.zkConfigProvider.getVerifierKey(circuitId);
-          let pendingRetries = 0;
+          let transactionRetries = 0;
 
           while (true) {
             setBusy(`Installing contract circuit ${index + 1} of ${deferredCircuitIds.length}`);
@@ -436,10 +459,12 @@ export const ZkEscrowProvider = ({ logger, children }: PropsWithChildren<{ logge
               setLastTransaction({ label: `Installed ${circuitId}`, txId: String(finalized.txId), blockHeight: finalized.blockHeight });
               break;
             } catch (cause) {
-              if (!isPendingTransactionError(cause) || pendingRetries >= maxPendingTransactionRetries) throw cause;
-              pendingRetries += 1;
-              setBusy(`Waiting for wallet confirmation before circuit ${index + 1} of ${deferredCircuitIds.length}`);
-              await wait(pendingTransactionRetryDelayMs);
+              const retryDelay = transactionRetryDelay(cause);
+              if (retryDelay === null || transactionRetries >= maxTransactionRetries) throw cause;
+              transactionRetries += 1;
+              const reason = retryDelay === bannedTransactionRetryDelayMs ? 'Preprod transaction pool' : 'wallet confirmation';
+              setBusy(`Waiting for ${reason} before circuit ${index + 1} of ${deferredCircuitIds.length}`);
+              await wait(retryDelay);
             }
           }
 
@@ -454,9 +479,11 @@ export const ZkEscrowProvider = ({ logger, children }: PropsWithChildren<{ logge
       }
 
       pendingDeploymentRef.current = null;
+      sessionStorage.removeItem(pendingContractStorageKey);
+      sessionStorage.removeItem(pendingSigningKeyStorageKey);
       await activateContract(address);
     }),
-    [activateContract, bootstrapContract, browserContract, identity, initializeProviders, run],
+    [activateContract, bootstrapContract, browserContract, identity, initializeProviders, privateStateProvider, run],
   );
 
   const join = useCallback(
