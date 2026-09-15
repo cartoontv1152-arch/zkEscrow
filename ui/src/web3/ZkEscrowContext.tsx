@@ -15,7 +15,7 @@ import { FetchZkConfigProvider } from '@midnight-ntwrk/midnight-js-fetch-zk-conf
 import { httpClientProofProvider } from '@midnight-ntwrk/midnight-js-http-client-proof-provider';
 import { indexerPublicDataProvider } from '@midnight-ntwrk/midnight-js-indexer-public-data-provider';
 import { setNetworkId } from '@midnight-ntwrk/midnight-js-network-id';
-import { deployContract, findDeployedContract, submitCallTx } from '@midnight-ntwrk/midnight-js-contracts';
+import { deployContract, findDeployedContract, submitCallTx, submitInsertVerifierKeyTx } from '@midnight-ntwrk/midnight-js-contracts';
 import { CompiledContract } from '@midnight-ntwrk/midnight-js-protocol/compact-js';
 import {
   encodeUserAddress,
@@ -54,6 +54,7 @@ import {
 } from '@zkescrow/api';
 import { inMemoryPrivateStateProvider } from '../lib/in-memory-private-state-provider.js';
 import { resolveContractTarget } from '../lib/contract-target.js';
+import { deferredCircuitIds, ZkEscrowBootstrapContract } from './bootstrap-contract.js';
 
 type ZkContract = Contract<ZkEscrowPrivateState, Witnesses<ZkEscrowPrivateState>>;
 type CircuitKey = Exclude<keyof ZkContract['impureCircuits'], number | symbol>;
@@ -227,6 +228,7 @@ export const ZkEscrowProvider = ({ logger, children }: PropsWithChildren<{ logge
   const providersRef = useRef<Providers | null>(null);
   const connectedApiRef = useRef<ConnectedAPI | null>(null);
   const addressRef = useRef<ContractAddress | null>(null);
+  const pendingDeploymentRef = useRef<ContractAddress | null>(null);
 
   const privateStateProvider = useMemo(
     () => inMemoryPrivateStateProvider<typeof PRIVATE_STATE_ID, ZkEscrowPrivateState>(),
@@ -236,6 +238,14 @@ export const ZkEscrowProvider = ({ logger, children }: PropsWithChildren<{ logge
   const browserContract = useMemo(
     () =>
       CompiledContract.make<ZkContract>('zkEscrow', Contract<ZkEscrowPrivateState, Witnesses<ZkEscrowPrivateState>>).pipe(
+        CompiledContract.withWitnesses(witnesses),
+        CompiledContract.withCompiledFileAssets(window.location.origin),
+      ),
+    [],
+  );
+  const bootstrapContract = useMemo(
+    () =>
+      CompiledContract.make<ZkContract>('zkEscrow', ZkEscrowBootstrapContract).pipe(
         CompiledContract.withWitnesses(witnesses),
         CompiledContract.withCompiledFileAssets(window.location.origin),
       ),
@@ -389,15 +399,38 @@ export const ZkEscrowProvider = ({ logger, children }: PropsWithChildren<{ logge
   const deploy = useCallback(
     () => run('Deploying contract to Preprod', async () => {
       const providers = await initializeProviders();
-      const deployed = await deployContract(providers, {
-        compiledContract: browserContract,
-        privateStateId: PRIVATE_STATE_ID,
-        initialPrivateState: { userSecret: identity },
-      });
-      setLastTransaction({ label: 'Contract deployment', txId: String(deployed.deployTxData.public.txId), blockHeight: deployed.deployTxData.public.blockHeight });
-      await activateContract(deployed.deployTxData.public.contractAddress);
+      let address = pendingDeploymentRef.current;
+
+      if (!address) {
+        const deployed = await deployContract(providers, {
+          compiledContract: bootstrapContract,
+          privateStateId: PRIVATE_STATE_ID,
+          initialPrivateState: { userSecret: identity },
+        });
+        address = deployed.deployTxData.public.contractAddress;
+        pendingDeploymentRef.current = address;
+        setLastTransaction({ label: 'Core contract deployment', txId: String(deployed.deployTxData.public.txId), blockHeight: deployed.deployTxData.public.blockHeight });
+      }
+
+      try {
+        for (const [index, circuitId] of deferredCircuitIds.entries()) {
+          setBusy(`Installing contract circuit ${index + 1} of ${deferredCircuitIds.length}`);
+          const state = await providers.publicDataProvider.queryContractState(address);
+          if (!state) throw new Error('The new registry is not visible in the Preprod indexer yet. Retry in a moment.');
+          if (state.operation(circuitId)) continue;
+          const verifierKey = await providers.zkConfigProvider.getVerifierKey(circuitId);
+          const finalized = await submitInsertVerifierKeyTx(providers, browserContract, address, circuitId, verifierKey);
+          setLastTransaction({ label: `Installed ${circuitId}`, txId: String(finalized.txId), blockHeight: finalized.blockHeight });
+        }
+      } catch (cause) {
+        const message = cause instanceof Error ? cause.message : String(cause);
+        throw new Error(`Registry ${address} was deployed, but setup paused: ${message} Keep this page open and click Deploy to Preprod again to resume.`);
+      }
+
+      pendingDeploymentRef.current = null;
+      await activateContract(address);
     }),
-    [activateContract, browserContract, identity, initializeProviders, run],
+    [activateContract, bootstrapContract, browserContract, identity, initializeProviders, run],
   );
 
   const join = useCallback(
