@@ -97,6 +97,8 @@ $env:VITE_ZKESCROW_CONTRACT_ADDRESS="<deployed-contract-address>"
 
 On Vercel, add `VITE_ZKESCROW_CONTRACT_ADDRESS` to the Production environment. After wallet connection the DApp joins this registry automatically; ordinary users never deploy a contract or paste an address. The legacy deployment/join controls are available only to an operator at `/?admin=1` for initial setup or diagnostics.
 
+The operator deployment is staged to stay within current Preprod block limits: seven core circuit verifier keys are deployed first, then the remaining nine are installed through signed contract-maintenance transactions. Keep the wallet and operator page open until all ten transactions finalize; if a maintenance transaction is interrupted, click **Deploy to Preprod** again in the same page session to resume.
+
 Deploy from the repository root after authenticating with the Vercel CLI or connecting the repository in the Vercel dashboard:
 
 ```powershell
