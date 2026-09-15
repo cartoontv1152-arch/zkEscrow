@@ -17,7 +17,7 @@ import type { DealView } from '@zkescrow/api';
 import { formatTnight } from '@zkescrow/api';
 import { useZkEscrow } from './web3/ZkEscrowContext.js';
 import { Landing } from './components/Landing.js';
-import { ContractGate } from './components/ContractGate.js';
+import { ContractGate, ContractStartup } from './components/ContractGate.js';
 import { Dashboard } from './components/Dashboard.js';
 import { CreateDeal } from './components/CreateDeal.js';
 import { DealDetail } from './components/DealDetail.js';
@@ -43,6 +43,7 @@ export default function App() {
   const [dismissedInvite, setDismissedInvite] = useState<bigint | null>(null);
   const inviteParams = useMemo(() => new URLSearchParams(window.location.hash.replace(/^#/, '')), []);
   const detectedAddress = inviteParams.get('contract') ?? undefined;
+  const operatorMode = new URLSearchParams(window.location.search).get('admin') === '1';
 
   useEffect(() => {
     document.documentElement.dataset.theme = dark ? 'dark' : 'light';
@@ -68,7 +69,21 @@ export default function App() {
   }
 
   if (!api.contractAddress) {
-    return <><ContractGate deploy={() => void api.deploy().catch(() => undefined)} join={(address) => void api.join(address).catch(() => undefined)} busy={!!api.busy} detectedAddress={detectedAddress} /><SystemFeedback busy={api.busy} error={api.error} clearError={api.clearError} lastTransaction={api.lastTransaction} clearLastTransaction={api.clearLastTransaction} /></>;
+    return <>
+      {operatorMode
+        ? <ContractGate deploy={() => void api.deploy().catch(() => undefined)} join={(address) => void api.join(address).catch(() => undefined)} busy={!!api.busy} detectedAddress={detectedAddress} />
+        : <ContractStartup
+            hasTarget={!!api.contractTargetAddress}
+            configurationError={api.contractConfigurationError}
+            connectionError={api.error}
+            busy={!!api.busy}
+            retry={() => {
+              api.clearError();
+              if (api.contractTargetAddress) void api.join(api.contractTargetAddress).catch(() => undefined);
+            }}
+          />}
+      <SystemFeedback busy={api.busy} error={api.error} clearError={api.clearError} lastTransaction={api.lastTransaction} clearLastTransaction={api.clearLastTransaction} />
+    </>;
   }
 
   const createdInvite = api.lastCreatedInvite && api.lastCreatedInvite.dealId !== dismissedInvite ? api.lastCreatedInvite : null;

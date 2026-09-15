@@ -1,1 +1,1 @@
-{"version":"4.1.11","results":[[":src/lib/deal-actions.test.ts",{"duration":7.436500000000024,"failed":false}]]}
+{"version":"4.1.11","results":[[":src/lib/deal-actions.test.ts",{"duration":4.900900000000092,"failed":false}],[":src/lib/contract-target.test.ts",{"duration":4.775500000000022,"failed":false}]]}

@@ -89,6 +89,14 @@ The repository includes `vercel.json` with the monorepo build and output setting
 - build: `npm run build`
 - output: `ui/dist`
 
+Production uses one shared on-chain registry. Set its public 64-character Preprod address before building:
+
+```powershell
+$env:VITE_ZKESCROW_CONTRACT_ADDRESS="<deployed-contract-address>"
+```
+
+On Vercel, add `VITE_ZKESCROW_CONTRACT_ADDRESS` to the Production environment. After wallet connection the DApp joins this registry automatically; ordinary users never deploy a contract or paste an address. The legacy deployment/join controls are available only to an operator at `/?admin=1` for initial setup or diagnostics.
+
 Deploy from the repository root after authenticating with the Vercel CLI or connecting the repository in the Vercel dashboard:
 
 ```powershell

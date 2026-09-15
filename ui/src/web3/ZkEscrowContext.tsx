@@ -53,6 +53,7 @@ import {
   type DealView,
 } from '@zkescrow/api';
 import { inMemoryPrivateStateProvider } from '../lib/in-memory-private-state-provider.js';
+import { resolveContractTarget } from '../lib/contract-target.js';
 
 type ZkContract = Contract<ZkEscrowPrivateState, Witnesses<ZkEscrowPrivateState>>;
 type CircuitKey = Exclude<keyof ZkContract['impureCircuits'], number | symbol>;
@@ -102,6 +103,8 @@ export type CreateDealInput = {
 type ContextValue = {
   readonly wallet: WalletSummary | null;
   readonly contractAddress: ContractAddress | null;
+  readonly contractTargetAddress: ContractAddress | null;
+  readonly contractConfigurationError: string | null;
   readonly identitySecret: string;
   readonly deals: readonly DealView[];
   readonly metadata: Readonly<Record<string, PrivateMetadata>>;
@@ -214,6 +217,13 @@ export const ZkEscrowProvider = ({ logger, children }: PropsWithChildren<{ logge
   const [error, setError] = useState<string | null>(null);
   const [lastCreatedInvite, setLastCreatedInvite] = useState<CreatedInvite | null>(null);
   const [lastTransaction, setLastTransaction] = useState<TransactionReceipt | null>(null);
+  const [contractTarget] = useState(() => {
+    const inviteAddress = getInviteParameters().get('contract');
+    let storedAddress: string | null = null;
+    try { storedAddress = localStorage.getItem(contractStorageKey); } catch { /* Storage is an optional fallback. */ }
+    return resolveContractTarget(import.meta.env.VITE_ZKESCROW_CONTRACT_ADDRESS, inviteAddress, storedAddress);
+  });
+  const operatorMode = new URLSearchParams(window.location.search).get('admin') === '1';
   const providersRef = useRef<Providers | null>(null);
   const connectedApiRef = useRef<ConnectedAPI | null>(null);
   const addressRef = useRef<ContractAddress | null>(null);
@@ -561,14 +571,14 @@ export const ZkEscrowProvider = ({ logger, children }: PropsWithChildren<{ logge
   }, [contractAddress, logger, refresh]);
 
   useEffect(() => {
-    const params = getInviteParameters();
-    const address = params.get('contract') ?? localStorage.getItem(contractStorageKey);
-    if (address && wallet && !contractAddress) void join(address).catch(() => undefined);
-  }, [contractAddress, join, wallet]);
+    if (!operatorMode && contractTarget.address && wallet && !contractAddress) void join(contractTarget.address).catch(() => undefined);
+  }, [contractAddress, contractTarget.address, join, operatorMode, wallet]);
 
   const value: ContextValue = {
     wallet,
     contractAddress,
+    contractTargetAddress: contractTarget.address,
+    contractConfigurationError: contractTarget.configurationError,
     identitySecret: bytesToHex(identity),
     deals,
     metadata,
